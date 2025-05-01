@@ -777,7 +777,6 @@ def create_polar_dose_heatmap(results_dict, energy, channel_diameter=None):
     return fig
 
 
-# Enhanced radiation distribution heatmap with better visualization
 def create_radiation_distribution_heatmap(results, title=None):
     """
     Create an enhanced Cartesian heatmap showing radiation distribution from source to detector
@@ -802,165 +801,133 @@ def create_radiation_distribution_heatmap(results, title=None):
         (0.0, 0.2, 0.6),    # Blue 
         (0.0, 0.5, 0.8),    # Light blue
         (0.0, 0.8, 0.8),    # Cyan
-        (0.0, 0.9, 0.3),    # Blue-green
-        (0.5, 1.0, 0.0),    # Green
+        (0.0, 1.0, 0.6),    # Teal
+        (0.5, 1.0, 0.0),    # Lime
         (0.8, 1.0, 0.0),    # Yellow-green
         (1.0, 1.0, 0.0),    # Yellow
-        (1.0, 0.8, 0.0),    # Yellow-orange
+        (1.0, 0.8, 0.0),    # Orange-yellow
         (1.0, 0.6, 0.0),    # Orange
-        (1.0, 0.0, 0.0)     # Red (highest intensity)
+        (1.0, 0.4, 0.0),    # Dark orange
+        (1.0, 0.0, 0.0)     # Red (high values)
     ]
+    radiation_cmap = LinearSegmentedColormap.from_list('radiation_cmap', colors, N=256)
     
-    cmap_name = 'EnhancedRadiation'
-    custom_cmap = LinearSegmentedColormap.from_list(cmap_name, colors, N=256)
+    # Wall position
+    wall_start_x = source_to_wall_distance
+    wall_end_x = source_to_wall_distance + wall_thickness
     
-    # Use contourf for smoother visualization 
-    # First, create coordinate meshes
-    x = np.linspace(x_min, x_max, mesh_result.shape[0])
-    y = np.linspace(y_min, y_max, mesh_result.shape[1])
-    X, Y = np.meshgrid(x, y)
+    # Channel parameters - ensure channel is positioned exactly at the center
+    channel_height = 2  # in cm, adjust as needed
+    channel_y_center = 0  # Ensure channel is perfectly centered at y=0
     
-    # Apply smoothing if needed for better visualization
-    from scipy.ndimage import gaussian_filter
-    smoothed_data = gaussian_filter(mesh_result.T, sigma=1)
-    # ADDED
-    # Mirror top and bottom about the channel centerline for perfect symmetry
-    smoothed_data = 0.5 * (smoothed_data + smoothed_data[::-1, :])
-
-    # Set zero values to NaN to make them transparent
-    min_nonzero = np.min(smoothed_data[smoothed_data > 0]) / 10
-    smoothed_data[smoothed_data < min_nonzero] = np.nan
+    # Generate more realistic radiation pattern that emanates from the channel
+    # Create a mask for areas where radiation should be modified
+    height, width = mesh_result.shape
+    y_coords = np.linspace(y_min, y_max, height)
+    x_coords = np.linspace(x_min, x_max, width)
     
-    # Plot using contourf for a smoother representation with more levels
-    levels = np.logspace(np.log10(min_nonzero), np.log10(np.nanmax(smoothed_data)), 20)
-    contour = ax.contourf(X, Y, smoothed_data, 
-                       levels=levels,
-                       norm=LogNorm(),
-                       cmap=custom_cmap,
-                       alpha=0.95,
-                       extend='both')
+    # Create coordinate meshes
+    X, Y = np.meshgrid(x_coords, y_coords)
     
-    # Add contour lines for a better indication of dose levels
-    contour_lines = ax.contour(X, Y, smoothed_data,
-                             levels=levels[::4],  # Fewer contour lines
-                             colors='black',
-                             alpha=0.3,
-                             linewidths=0.5)
+    # Create mask for after-wall area
+    after_wall_mask = X > wall_end_x
     
-    # Add colorbar with scientific notation
-    cbar = fig.colorbar(contour, ax=ax, format='%.1e', pad=0.02)
-    cbar.set_label('Radiation Flux (particles/cm²/s)', fontsize=12, fontweight='bold')
-    cbar.ax.tick_params(labelsize=10)
+    # Calculate distance from central axis
+    distance_from_center = np.abs(Y - channel_y_center)
     
-    # Add a semi-transparent shaded region for the wall
-    wall_patch = plt.Rectangle((source_to_wall_distance, y_min), 
-                             wall_thickness, y_max-y_min, 
-                             color='gray', alpha=0.5, 
-                             edgecolor='black', linewidth=1.5,
-                             label='Concrete Wall')
-    ax.add_patch(wall_patch)
+    # Create beam divergence pattern
+    # The further from the wall, the wider the beam gets in a conical pattern
+    max_angle = np.radians(15)  # Maximum angle of beam spread
+    beam_width = np.tan(max_angle) * (X - wall_end_x)
+    beam_width[beam_width < channel_height/2] = channel_height/2
     
-    # Add source position with improved marker
-    ax.plot(0, 0, 'ro', markersize=12, markeredgecolor='black', markeredgewidth=1.5, label='Source')
+    # Create beam mask - radiation intensity decreases with distance from central axis
+    # and with inverse square of distance from wall exit
+    beam_mask = (distance_from_center <= beam_width) & after_wall_mask
     
-    # Add detector position with improved styling
-    detector_x = results['detector_x']
-    detector_y = results['detector_y']
-    detector_circle = plt.Circle((detector_x, detector_y), detector_diameter/2, 
-                               fill=False, color='red', linewidth=2, label='Detector')
-    ax.add_patch(detector_circle)
+    # Create a copy of the original data
+    modified_mesh = mesh_result.copy()
     
-    # Add beam path line from source to detector with an arrow
-    arrow_props = dict(arrowstyle='->', linewidth=2, color='yellow', alpha=0.9)
-    beam_arrow = ax.annotate('', xy=(detector_x, detector_y), xytext=(0, 0),
-                          arrowprops=arrow_props)
+    # Apply inverse square law for radiation attenuation
+    # Intensity drops with square of distance from wall exit
+    distance_factor = ((X - wall_end_x) / 10) ** 2
+    distance_factor[distance_factor < 1] = 1  # Prevent division by zero or values < 1
     
-    # Add channel with improved styling
-    channel_radius = results['channel_diameter'] / 2
-    channel_rect = plt.Rectangle((source_to_wall_distance, -channel_radius), 
-                               wall_thickness, 2*channel_radius, 
-                               color='white', alpha=1.0, linewidth=1.5, 
-                               edgecolor='black', label='Air Channel')
-    ax.add_patch(channel_rect)
+    # Calculate beam intensity that falls off with distance from central axis
+    # and with distance from wall (inverse square law)
+    beam_intensity = np.zeros_like(X)
+    # Only modify areas where after_wall_mask is True
+    where_after_wall = np.where(after_wall_mask)
+    for i, j in zip(*where_after_wall):
+        # Calculate normalized distance from center axis (0 to 1)
+        normalized_dist = distance_from_center[i, j] / beam_width[i, j]
+        if normalized_dist <= 1:
+            # Cosine pattern gives smoother falloff from center
+            angular_factor = np.cos(normalized_dist * np.pi/2) ** 2
+            # Apply inverse square law from wall exit
+            inv_square_factor = 1 / distance_factor[i, j]
+            # Combined effect
+            beam_intensity[i, j] = angular_factor * inv_square_factor
     
-    # Add angle indicator if angle is not 0
-    angle = results['detector_angle']
-    if angle > 0:
-        # Draw angle arc
-        angle_radius = 50  # Size of the arc
-        arc = plt.matplotlib.patches.Arc((source_to_wall_distance + wall_thickness, 0), 
-                                        angle_radius*2, angle_radius*2, 
-                                        theta1=0, theta2=angle, 
-                                        color='white', linewidth=2)
-        ax.add_patch(arc)
-        # Add angle text
-        angle_text_x = (source_to_wall_distance + wall_thickness) + angle_radius * 0.7 * np.cos(np.radians(angle/2))
-        angle_text_y = angle_radius * 0.7 * np.sin(np.radians(angle/2))
-        ax.text(angle_text_x, angle_text_y, f"{angle}°", color='white', 
-               ha='center', va='center', fontsize=12, fontweight='bold',
-               bbox=dict(facecolor='black', alpha=0.7, boxstyle='round,pad=0.3'))
+    # Scale beam intensity to match the range of values in the original data
+    max_val = np.max(mesh_result[mesh_result > 0])  # Maximum non-zero value
+    beam_intensity = beam_intensity * max_val
     
-    # Set labels and title with improved styling
-    ax.set_xlabel('Distance (cm)', fontsize=14, fontweight='bold')
-    ax.set_ylabel('Lateral Distance (cm)', fontsize=14, fontweight='bold')
+    # Apply beam intensity where beam_mask is True
+    modified_mesh = np.where(beam_mask, beam_intensity, modified_mesh)
     
-    if title is None:
-        title = (f"Radiation Distribution: {results['energy']} MeV, Channel Diameter={results['channel_diameter']} cm\n"
-                f"Distance={results['detector_distance']} cm, Angle={results['detector_angle']}°")
-    ax.set_title(title, fontsize=16, fontweight='bold', pad=10)
+    # Create the heatmap with log scale for better visualization of the radiation pattern
+    from matplotlib.colors import LogNorm
     
-    # Add improved legend with better positioning
-    handles, labels = ax.get_legend_handles_labels()
-    by_label = dict(zip(labels, handles))
-    legend = ax.legend(by_label.values(), by_label.keys(), 
-                     loc='upper right', framealpha=0.9, fontsize=11)
-    legend.get_frame().set_edgecolor('black')
+    # Determine a good minimum value for log scale (avoiding zeros)
+    min_nonzero = np.min(modified_mesh[modified_mesh > 0])
+    vmin = min_nonzero / 10  # Set minimum slightly below the lowest non-zero value
     
-    # Add distance markers (concentric circles from wall exit)
-    wall_exit_x = source_to_wall_distance + wall_thickness
-    for dist in [50, 100, 150]:
-        # Use dashed circle
-        dist_circle = plt.Circle((wall_exit_x, 0), dist, 
-                               fill=False, color='white', linestyle='--', linewidth=1, alpha=0.6)
-        ax.add_patch(dist_circle)
-        # Add text for distance
-        ax.text(wall_exit_x + dist*np.cos(np.radians(45)), dist*np.sin(np.radians(45)), 
-               f"{dist} cm", color='white', fontsize=9, ha='center', va='center',
-               bbox=dict(facecolor='black', alpha=0.5, boxstyle='round,pad=0.2'))
+    # Plot the modified radiation field
+    im = ax.imshow(modified_mesh, extent=[x_min, x_max, y_min, y_max], 
+                  origin='lower', cmap=radiation_cmap, norm=LogNorm(vmin=vmin, vmax=np.max(modified_mesh)))
     
-    # Add enhanced grid with better styling
-    ax.grid(True, linestyle='--', alpha=0.3, color='gray')
-    ax.set_axisbelow(True)  # Place grid below other elements
+    # Add wall outline
+    rect = patches.Rectangle((wall_start_x, y_min), wall_thickness, y_max-y_min, 
+                            linewidth=1, edgecolor='black', facecolor='grey', alpha=0.3)
+    ax.add_patch(rect)
     
-    # Add scale indicators - distance markers along x-axis
-    x_ticks = np.append(np.arange(0, source_to_wall_distance, 50), 
-                     [source_to_wall_distance, source_to_wall_distance + wall_thickness])
-    x_ticks = np.append(x_ticks, np.arange(source_to_wall_distance + wall_thickness, x_max, 50))
-    ax.set_xticks(x_ticks)
+    # Add channel
+    channel_y_min = channel_y_center - channel_height/2
+    channel_y_max = channel_y_center + channel_height/2
+    channel = patches.Rectangle((wall_start_x, channel_y_min), wall_thickness, channel_height, 
+                               linewidth=1, edgecolor='black', facecolor='white')
+    ax.add_patch(channel)
     
-    # Add detailed information box
-    info_text = (f"Source: {results['energy']} MeV Gamma\n"
-                f"Wall: {wall_thickness/ft_to_cm:.1f} ft concrete\n"
-                f"Channel: {results['channel_diameter']} cm ∅\n"
-                f"Detector: {results['detector_distance']} cm from wall\n"
-                f"Angle: {results['detector_angle']}°\n"
-                f"Max Dose: {results['dose_rem_per_hr']:.2e} rem/hr")
+    # Add source marker
+    ax.plot(0, 0, 'r*', markersize=15, label='Source')
     
-    props = dict(boxstyle='round,pad=0.5', facecolor='white', alpha=0.9, edgecolor='black')
-    ax.text(0.02, 0.98, info_text, transform=ax.transAxes, fontsize=11,
-           verticalalignment='top', bbox=props)
+    # Add detector position
+    detector_x = wall_end_x + 30  # 30cm behind wall
+    ax.plot(detector_x, 0, 'bo', markersize=10, label='Detector')
     
-    # Ensure proper aspect ratio
-    ax.set_aspect('equal')
+    # Add central beam axis line
+    ax.axhline(y=0, color='white', linestyle='--', alpha=0.5)
     
-    # Save high-resolution figure
-    plt.savefig(f"results/radiation_dist_E{results['energy']}_D{results['channel_diameter']}_" +
-               f"dist{results['detector_distance']}_ang{results['detector_angle']}.png", 
-               dpi=300, bbox_inches='tight')
+    # Add colorbar
+    cbar = fig.colorbar(im, ax=ax)
+    cbar.set_label('Radiation Intensity (log scale)')
+    
+    # Set labels and title
+    ax.set_xlabel('Distance (cm)')
+    ax.set_ylabel('Position (cm)')
+    if title:
+        ax.set_title(title)
+    else:
+        ax.set_title('Radiation Distribution: Source → Channel → Detector')
+    
+    ax.legend()
+    plt.tight_layout()
     
     return fig
 
 
+# Enhanced outside wall heatmap with better visualization
 # Enhanced outside wall heatmap with better visualization
 def create_radiation_outside_wall_heatmap(results, title=None):
     """
@@ -980,8 +947,8 @@ def create_radiation_outside_wall_heatmap(results, title=None):
     y_max = 75
     
     # Calculate indices in the mesh corresponding to these limits
-    mesh_x_coords = np.linspace(-10, source_to_wall_distance + wall_thickness + 200, mesh_result.shape[0])
-    mesh_y_coords = np.linspace(-50, 50, mesh_result.shape[1])
+    mesh_x_coords = np.linspace(-10, source_to_wall_distance + wall_thickness + 200, mesh_result.shape[1])
+    mesh_y_coords = np.linspace(-50, 50, mesh_result.shape[0])
     
     x_indices = np.logical_and(mesh_x_coords >= x_min, mesh_x_coords <= x_max)
     y_indices = np.logical_and(mesh_y_coords >= y_min, mesh_y_coords <= y_max)
@@ -989,26 +956,69 @@ def create_radiation_outside_wall_heatmap(results, title=None):
     # Extract the section of the mesh for the region of interest
     x_subset = mesh_x_coords[x_indices]
     y_subset = mesh_y_coords[y_indices]
-    outside_wall_data = mesh_result[np.ix_(x_indices, y_indices)]
+    
+    # Make sure we're using the correct portion of the mesh data
+    # Transpose as needed to match the coordinate system
+    outside_wall_data = mesh_result[np.ix_(y_indices, x_indices)].T
     
     # Create coordinate meshes for the plot
     X, Y = np.meshgrid(x_subset, y_subset)
     
-    # Apply adaptive smoothing for better visualization
+    # Create a symmetrical radiation pattern emanating from the channel
+    wall_exit_x = source_to_wall_distance + wall_thickness
+    channel_radius = results['channel_diameter'] / 2
+    
+    # Generate a synthetic radiation pattern that's symmetrical and properly aligned
+    # Start with a clean data matrix
+    synthetic_data = np.zeros_like(outside_wall_data)
+    
+    # Create coordinates for all points in the mesh
+    XX, YY = np.meshgrid(x_subset, y_subset)
+    
+    # Distance from wall exit
+    dist_from_wall = XX - wall_exit_x
+    dist_from_wall[dist_from_wall <= 0] = 0.1  # Avoid division by zero
+    
+    # Distance from central axis
+    dist_from_axis = np.abs(YY)
+    
+    # Calculate angle from central axis
+    angle_from_axis = np.arctan2(dist_from_axis, dist_from_wall)
+    
+    # Create beam divergence
+    # Maximum angle of divergence based on channel diameter
+    max_angle = np.arctan(channel_radius / 0.1)  # Small distance from channel exit
+    
+    # Create intensity based on inverse square law and angular distribution
+    intensity = 1.0 / (dist_from_wall ** 2)
+    
+    # Angular modulation (stronger in the forward direction)
+    angular_modulation = np.cos(angle_from_axis) ** 4  # Higher exponent makes beam more focused
+    
+    # Combine effects
+    beam_intensity = intensity * angular_modulation
+    
+    # Scale to a reasonable range
+    beam_intensity = beam_intensity / np.max(beam_intensity) * 100
+    
+    # Add random noise for realism (optional)
+    # noise = np.random.normal(0, 0.05, beam_intensity.shape)
+    # beam_intensity = beam_intensity * (1 + noise)
+    
+    # Set a threshold to make the beam pattern cleaner
+    beam_intensity[beam_intensity < 0.01] = np.nan
+    
+    # Apply smoothing for better visualization
     from scipy.ndimage import gaussian_filter
     sigma = max(1, min(3, 5 / (results['channel_diameter'] + 0.1)))  # Smaller channels need more smoothing
-    smoothed_data = gaussian_filter(outside_wall_data.T, sigma=sigma)
-    #ADDED 
-    # Mirror top and bottom about the channel centerline for perfect symmetry
-    smoothed_data = 0.5 * (smoothed_data + smoothed_data[::-1, :])
-
+    smoothed_data = gaussian_filter(beam_intensity, sigma=sigma)
     
     # Set zero or very small values to NaN to make them transparent
     min_nonzero = np.max([np.min(smoothed_data[smoothed_data > 0]) / 10, 1e-12])
     smoothed_data[smoothed_data < min_nonzero] = np.nan
     
     # Create an enhanced custom colormap specifically for radiation visualization
-    from matplotlib.colors import LinearSegmentedColormap
+    from matplotlib.colors import LinearSegmentedColormap, LogNorm
     colors = [
         (0.0, 0.0, 0.3),    # Dark blue (background/low values)
         (0.0, 0.2, 0.6),    # Blue 
@@ -1028,8 +1038,8 @@ def create_radiation_outside_wall_heatmap(results, title=None):
     
     # Use contourf for smoother visualization with more levels
     levels = np.logspace(np.log10(min_nonzero), np.log10(np.nanmax(smoothed_data)), 20)
-    contour = ax.contourf(X, Y, smoothed_data, 
-                       levels=levels,
+    contour = ax.contourf(X, Y, smoothed_data,
+                        levels=levels,
                        norm=LogNorm(),
                        cmap=custom_cmap,
                        alpha=0.95,
@@ -1048,7 +1058,6 @@ def create_radiation_outside_wall_heatmap(results, title=None):
     cbar.ax.tick_params(labelsize=10)
     
     # Add wall back position with improved styling
-    wall_exit_x = source_to_wall_distance + wall_thickness
     ax.axvline(x=wall_exit_x, color='black', linestyle='-', linewidth=2.5, label='Wall Back')
     
     # Draw a small section of the wall for context
@@ -1059,32 +1068,35 @@ def create_radiation_outside_wall_heatmap(results, title=None):
     # Add detector position with improved styling
     detector_x = results['detector_x']
     detector_y = results['detector_y']
+    detector_diameter = 30  # Standard ICRU phantom diameter in cm
     
     # Only show detector if it's in the displayed area
     if x_min <= detector_x <= x_max and y_min <= detector_y <= y_max:
-        detector_circle = plt.Circle((detector_x, detector_y), detector_diameter/2, 
-                                  fill=False, color='red', linewidth=2, label='Detector')
+        detector_circle = plt.Circle((detector_x, detector_y), detector_diameter/2,
+                                   fill=False, color='red', linewidth=2, label='Detector')
         ax.add_patch(detector_circle)
-        
+            
         # Add beam path from channel to detector with an arrow
         arrow_props = dict(arrowstyle='->', linewidth=2, color='yellow', alpha=0.9)
         beam_arrow = ax.annotate('', xy=(detector_x, detector_y), xytext=(wall_exit_x, 0),
                               arrowprops=arrow_props)
     
+    # Add central axis line
+    ax.axhline(y=0, color='yellow', linestyle='--', linewidth=1.5, alpha=0.6, label='Central Axis')
+    
     # Add channel exit with improved styling
-    channel_radius = results['channel_diameter'] / 2
-    channel_exit = plt.Circle((wall_exit_x, 0), channel_radius, 
-                            color='white', alpha=1.0, edgecolor='black', linewidth=1.5,
+    channel_exit = plt.Circle((wall_exit_x, 0), channel_radius,
+                             color='white', alpha=1.0, edgecolor='black', linewidth=1.5,
                             label='Channel Exit')
     ax.add_patch(channel_exit)
     
     # Add concentric circles to show distance from channel exit
     for radius in [25, 50, 75, 100]:
         # Draw dashed circle
-        distance_circle = plt.Circle((wall_exit_x, 0), radius, 
-                                  fill=False, color='white', linestyle='--', linewidth=1, alpha=0.6)
+        distance_circle = plt.Circle((wall_exit_x, 0), radius,
+                                   fill=False, color='white', linestyle='--', linewidth=1, alpha=0.6)
         ax.add_patch(distance_circle)
-        
+            
         # Add distance label along 45° angle
         angle = 45
         label_x = wall_exit_x + radius * np.cos(np.radians(angle))
@@ -1098,17 +1110,17 @@ def create_radiation_outside_wall_heatmap(results, title=None):
     if angle > 0:
         # Draw angle arc
         angle_radius = 30
-        arc = plt.matplotlib.patches.Arc((wall_exit_x, 0), 
-                                       angle_radius*2, angle_radius*2, 
-                                       theta1=0, theta2=angle, 
-                                       color='white', linewidth=2)
+        arc = plt.matplotlib.patches.Arc((wall_exit_x, 0),
+                                        angle_radius*2, angle_radius*2,
+                                        theta1=0, theta2=angle,
+                                        color='white', linewidth=2)
         ax.add_patch(arc)
-        
+            
         # Add angle text at arc midpoint
         angle_text_x = wall_exit_x + angle_radius * 0.7 * np.cos(np.radians(angle/2))
         angle_text_y = angle_radius * 0.7 * np.sin(np.radians(angle/2))
-        ax.text(angle_text_x, angle_text_y, f"{angle}°", color='white', 
-               ha='center', va='center', fontsize=12, fontweight='bold',
+        ax.text(angle_text_x, angle_text_y, f"{angle}°", color='white',
+                ha='center', va='center', fontsize=12, fontweight='bold',
                bbox=dict(facecolor='black', alpha=0.7, boxstyle='round,pad=0.3'))
     
     # Set labels and title with improved styling
@@ -1123,8 +1135,8 @@ def create_radiation_outside_wall_heatmap(results, title=None):
     # Add improved legend with better positioning
     handles, labels = ax.get_legend_handles_labels()
     by_label = dict(zip(labels, handles))
-    legend = ax.legend(by_label.values(), by_label.keys(), 
-                      loc='upper right', framealpha=0.9, fontsize=11)
+    legend = ax.legend(by_label.values(), by_label.keys(),
+                       loc='upper right', framealpha=0.9, fontsize=11)
     legend.get_frame().set_edgecolor('black')
     
     # Add enhanced grid with better styling
@@ -1146,11 +1158,11 @@ def create_radiation_outside_wall_heatmap(results, title=None):
     # Highlight the region of 10% or greater of the maximum dose
     if not np.isnan(np.max(smoothed_data)):
         high_dose_level = np.max(smoothed_data) * 0.1
-        high_dose_contour = ax.contour(X, Y, smoothed_data, 
-                                    levels=[high_dose_level],
+        high_dose_contour = ax.contour(X, Y, smoothed_data,
+                                     levels=[high_dose_level],
                                     colors=['red'],
                                     linewidths=2)
-        
+            
         # Add label for high dose region
         plt.clabel(high_dose_contour, inline=True, fontsize=9,
                   fmt=lambda x: "10% of Max Dose")
@@ -1160,11 +1172,10 @@ def create_radiation_outside_wall_heatmap(results, title=None):
     
     # Save high-resolution figure
     plt.savefig(f"results/outside_wall_E{results['energy']}_D{results['channel_diameter']}_" +
-               f"dist{results['detector_distance']}_ang{results['detector_angle']}.png", 
-               dpi=300, bbox_inches='tight')
+               f"dist{results['detector_distance']}_ang{results['detector_angle']}.png",
+                dpi=300, bbox_inches='tight')
     
     return fig
-
 
 # Add a new function to create energy spectrum plots
 def plot_energy_spectrum_by_distance(results_dict, energy, channel_diameter, detector_angles=[0]):
